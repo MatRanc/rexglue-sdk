@@ -59,6 +59,8 @@ REXCVAR_DEFINE_BOOL(vulkan_tessellation_wireframe, false, "GPU/Vulkan",
                     "Render tessellation as wireframe")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DECLARE(bool, spirv_pixel_shader_no_contraction);
+
 namespace rex::graphics::vulkan {
 
 namespace {
@@ -969,6 +971,7 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentPixelShaderMo
       shader_translator_->GetDefaultPixelShaderModification(
           shader.GetDynamicAddressableRegisterCount(regs.Get<reg::SQ_PROGRAM_CNTL>().ps_num_reg)));
 
+  modification.pixel.contraction_allowed = !REXCVAR_GET(spirv_pixel_shader_no_contraction);
   modification.pixel.interpolator_mask = interpolator_mask;
   modification.pixel.interpolators_centroid =
       interpolator_mask & ~xenos::GetInterpolatorSamplingPattern(
@@ -3679,7 +3682,9 @@ void VulkanPipelineCache::StorageWriteThread() {
         storage_write_flush_pipelines_ = false;
         flush_pipelines = true;
       }
-      if (!shader && !write_pipeline) {
+      // A flush taken from the request flags runs at the top of the loop; waiting first would
+      // leave the written data in the stdio buffer until the next storage request.
+      if (!shader && !write_pipeline && !flush_shaders && !flush_pipelines) {
         storage_write_request_cond_.wait(lock);
         continue;
       }

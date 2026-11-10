@@ -147,7 +147,13 @@ constexpr uint32_t kRoundMask = 0x03;
 struct FPSCRRegister {
   uint32_t csr;
 
+  // Host rounding-mode field -> guest mode. x86 MXCSR.RC: 0 nearest, 1 -inf, 2 +inf, 3 zero; AArch64 FPCR.RMode:
+  // 0 nearest, 1 +inf, 2 -inf, 3 zero (upstream issue rexglue/rexglue-sdk#477: one table swapped Up/Down on ARM).
+#if defined(__aarch64__) || defined(_M_ARM64)
+  static constexpr size_t HostToGuest[] = {kRoundNearest, kRoundUp, kRoundDown, kRoundTowardZero};
+#else
   static constexpr size_t HostToGuest[] = {kRoundNearest, kRoundDown, kRoundUp, kRoundTowardZero};
+#endif
 
   using Platform = platform::FPSCRPlatform;
   static constexpr size_t RoundShift = Platform::RoundShift;

@@ -88,6 +88,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
       uint32_t param_gen_point : 1;
       // For host render targets - depth / stencil output mode.
       DepthStencilMode depth_stencil_mode : 3;
+      // Strip NoContraction from the pixel shader (spirv_pixel_shader_no_contraction false).
+      uint32_t contraction_allowed : 1;
     } pixel;
     uint64_t value = 0;
 

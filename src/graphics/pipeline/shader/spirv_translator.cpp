@@ -21,10 +21,18 @@
 #include <fmt/format.h>
 
 #include <rex/assert.h>
+#include <rex/cvar.h>
 #include <rex/graphics/pipeline/shader/spirv.h>
 #include <rex/graphics/pipeline/shader/spirv_translator.h>
 #include <rex/math.h>
 #include <rex/string/buffer.h>
+
+REXCVAR_DEFINE_BOOL(spirv_pixel_shader_no_contraction, true, "GPU/Shader",
+                    "Keep the NoContraction decoration (no fused multiply-add) on pixel shader "
+                    "arithmetic. false lets the host compiler fuse multiplies and adds in pixel "
+                    "shaders, faster on GPUs where the decoration disables fast paths (Apple "
+                    "GPUs via MoltenVK); vertex shaders always keep it for position invariance")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 namespace rex::graphics {
 
@@ -175,6 +183,9 @@ void SpirvShaderTranslator::StartTranslation() {
   // TODO(Triang3l): Logger.
   builder_ = std::make_unique<SpirvBuilder>(features_.spirv_version, (kSpirvMagicToolId << 16) | 1,
                                             nullptr);
+  // Vertex shaders always keep NoContraction for position invariance.
+  builder_->setNoContraction(!is_pixel_shader() ||
+                             !GetSpirvShaderModification().pixel.contraction_allowed);
 
   builder_->addCapability(IsSpirvTessEvalShader() ? spv::CapabilityTessellation
                                                   : spv::CapabilityShader);
