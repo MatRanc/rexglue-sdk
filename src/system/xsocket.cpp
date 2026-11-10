@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <algorithm>
 #include <cstring>
 #if !REX_PLATFORM_WIN32
 #include <fcntl.h>
@@ -54,6 +55,31 @@ uint32_t LoadBE32(const uint8_t* p) {
 }
 uint16_t LoadBE16(const uint8_t* p) {
   return uint16_t(p[0] << 8 | p[1]);
+}
+
+// N_XSOCKADDR / N_XSOCKADDR_IN start with a u16 address family (the WinSock and Linux layout). BSD hosts (macOS)
+// start a sockaddr with u8 sa_len, u8 sa_family instead, so a plain cast hands macOS family 0 (AF_UNSPEC): UDP
+// connect() then fails and the caller sees WSAEWOULDBLOCK forever. Convert explicitly in both directions.
+socklen_t ToNativeAddr(const void* addr, int len, sockaddr_storage& out) {
+  std::memset(&out, 0, sizeof(out));
+  if (!addr || len < 2) return 0;
+  len = std::min<int>(len, int(sizeof(out)));
+  uint16_t family;
+  std::memcpy(&family, addr, sizeof(family));
+  std::memcpy(reinterpret_cast<uint8_t*>(&out) + 2, static_cast<const uint8_t*>(addr) + 2, size_t(len - 2));
+  out.ss_family = static_cast<decltype(out.ss_family)>(family);
+#if defined(__APPLE__)
+  out.ss_len = static_cast<uint8_t>(len);
+#endif
+  return static_cast<socklen_t>(len);
+}
+
+void FromNativeAddr(const sockaddr_storage& in, socklen_t len, void* addr) {
+  const uint16_t family = in.ss_family;
+  std::memcpy(addr, &family, sizeof(family));
+  if (len > 2) {
+    std::memcpy(static_cast<uint8_t*>(addr) + 2, reinterpret_cast<const uint8_t*>(&in) + 2, size_t(len - 2));
+  }
 }
 
 }  // namespace
@@ -216,7 +242,9 @@ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
 }
 
 X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
-  int ret = connect(native_handle_, (sockaddr*)name, name_len);
+  sockaddr_storage native;
+  const socklen_t native_len = ToNativeAddr(name, name_len, native);
+  int ret = connect(native_handle_, reinterpret_cast<sockaddr*>(&native), native_len);
   if (ret < 0) {
     return X_STATUS_UNSUCCESSFUL;
   }
@@ -225,7 +253,9 @@ X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
 }
 
 X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
-  int ret = bind(native_handle_, (sockaddr*)name, name_len);
+  sockaddr_storage native;
+  const socklen_t native_len = ToNativeAddr(name, name_len, native);
+  int ret = bind(native_handle_, reinterpret_cast<sockaddr*>(&native), native_len);
   if (ret < 0) {
     return X_STATUS_UNSUCCESSFUL;
   }
@@ -246,16 +276,16 @@ X_STATUS XSocket::Listen(int backlog) {
 }
 
 object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len) {
-  sockaddr n_sockaddr;
-  socklen_t n_name_len = sizeof(sockaddr);
-  uintptr_t ret = accept(native_handle_, &n_sockaddr, &n_name_len);
+  sockaddr_storage n_sockaddr{};
+  socklen_t n_name_len = sizeof(sockaddr_in);
+  uintptr_t ret = accept(native_handle_, reinterpret_cast<sockaddr*>(&n_sockaddr), &n_name_len);
   if (ret == -1) {
     std::memset(name, 0, *name_len);
     *name_len = 0;
     return nullptr;
   }
 
-  std::memcpy(name, &n_sockaddr, n_name_len);
+  FromNativeAddr(n_sockaddr, n_name_len, name);
   *name_len = n_name_len;
 
 #if !REX_PLATFORM_WIN32
@@ -351,7 +381,10 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
   }
   */
 
-  sockaddr_in nto;
+  sockaddr_in nto{};
+#if defined(__APPLE__)
+  nto.sin_len = sizeof(nto);
+#endif
   if (to) {
     nto.sin_addr.s_addr = to->sin_addr;
     nto.sin_family = to->sin_family;
