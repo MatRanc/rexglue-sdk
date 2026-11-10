@@ -10,6 +10,9 @@
  */
 
 #include <cstring>
+#if !REX_PLATFORM_WIN32
+#include <fcntl.h>
+#endif
 
 #include <rex/kernel/xam/module.h>
 #include <rex/platform.h>
@@ -75,20 +78,95 @@ X_STATUS XSocket::Close() {
 }
 
 X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr, uint32_t optlen) {
-  if (level == 0xFFFF && (optname == 0x5801 || optname == 0x5802)) {
+  constexpr uint32_t kXSolSocket = 0xFFFF;
+  constexpr uint32_t kXSoReuseAddr = 0x0004;
+
+  if (level == kXSolSocket && (optname == 0x5801 || optname == 0x5802)) {
     // Disable socket encryption
     secure_ = false;
     return X_STATUS_SUCCESS;
   }
 
-  int ret = setsockopt(native_handle_, level, optname, (char*)optval_ptr, optlen);
+  // Xbox sockets use WinSock's level/option numbering. SOL_SOCKET is 0xFFFF
+  // there and 1 on Linux, and the option names differ too, so passing them
+  // straight through makes setsockopt fail with ENOPROTOOPT. In particular
+  // titles never actually get SO_REUSEADDR, which they rely on to bind
+  // several P2P sockets to one local port.
+  int native_level = static_cast<int>(level);
+  int native_optname = static_cast<int>(optname);
+  if (level == kXSolSocket) {
+    native_level = SOL_SOCKET;
+    switch (optname) {
+      case 0x0004:
+        native_optname = SO_REUSEADDR;
+        break;
+      case 0x0020:
+        native_optname = SO_BROADCAST;
+        break;
+      case 0x0080:
+        native_optname = SO_LINGER;
+        break;
+      case 0x1001:
+        native_optname = SO_SNDBUF;
+        break;
+      case 0x1002:
+        native_optname = SO_RCVBUF;
+        break;
+      case 0x1005:
+        native_optname = SO_SNDTIMEO;
+        break;
+      case 0x1006:
+        native_optname = SO_RCVTIMEO;
+        break;
+      default:
+        break;
+    }
+  }
+
+  // Guest option values are big-endian, and titles often pass a 1-byte
+  // boolean (e.g. SO_REUSEADDR with optlen 1). Linux only accepts a 4-byte
+  // int for these options, so normalize: pad short values to an int and
+  // byte-swap full words.
+  int native_value = 0;
+  const void* native_ptr = optval_ptr;
+  uint32_t native_len = optlen;
+  bool value_is_true = false;
+  if (optval_ptr && optlen == 1) {
+    native_value = *static_cast<uint8_t*>(optval_ptr);
+    value_is_true = native_value != 0;
+    native_ptr = &native_value;
+    native_len = sizeof(native_value);
+  } else if (optval_ptr && optlen == 4) {
+    uint32_t raw;
+    std::memcpy(&raw, optval_ptr, 4);
+    // Boolean options are sometimes already host order (a byte written into a
+    // 4-byte slot); accept 0/1 as-is, otherwise treat as big-endian.
+    const bool is_bool_opt = native_optname == SO_REUSEADDR || native_optname == SO_BROADCAST;
+    native_value = static_cast<int>(is_bool_opt && raw <= 1 ? raw : __builtin_bswap32(raw));
+    value_is_true = native_value != 0;
+    native_ptr = &native_value;
+    native_len = sizeof(native_value);
+  }
+
+  int ret = setsockopt(native_handle_, native_level, native_optname, (char*)native_ptr, native_len);
   if (ret < 0) {
     // TODO: WSAGetLastError()
     return X_STATUS_UNSUCCESSFUL;
   }
 
+#if REX_PLATFORM_LINUX && defined(SO_REUSEPORT)
+  // Windows' SO_REUSEADDR allows several sockets to bind the same local
+  // address/port (P2P titles open one per peer). Linux only allows that with
+  // SO_REUSEPORT, so mirror the request. It must be set on every socket that
+  // asks for SO_REUSEADDR, before bind.
+  if (level == kXSolSocket && optname == kXSoReuseAddr && value_is_true) {
+    int one = 1;
+    setsockopt(native_handle_, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
+  }
+#endif
+
   // SO_BROADCAST
-  if (level == 0xFFFF && optname == 0x0020) {
+  if (level == kXSolSocket && optname == 0x0020) {
     broadcast_socket_ = true;
   }
 
@@ -147,6 +225,21 @@ object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len) {
 
   std::memcpy(name, &n_sockaddr, n_name_len);
   *name_len = n_name_len;
+
+#if !REX_PLATFORM_WIN32
+  // WinSock: a socket returned by accept() inherits the listener's non-blocking
+  // mode. POSIX does not, so the accepted socket would block the game thread in
+  // recv() whenever the peer has nothing to send. Mirror the Windows behaviour.
+  {
+    const int listener_flags = fcntl(static_cast<int>(native_handle_), F_GETFL, 0);
+    if (listener_flags >= 0 && (listener_flags & O_NONBLOCK)) {
+      const int accepted_flags = fcntl(static_cast<int>(ret), F_GETFL, 0);
+      if (accepted_flags >= 0) {
+        fcntl(static_cast<int>(ret), F_SETFL, accepted_flags | O_NONBLOCK);
+      }
+    }
+  }
+#endif
 
   // Create a kernel object to represent the new socket, and copy parameters
   // over.

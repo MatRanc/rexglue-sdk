@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -218,7 +219,12 @@ class UserProfile {
 
   uint64_t xuid() const { return xuid_; }
   std::string name() const { return name_; }
-  uint32_t signin_state() const { return 1; }
+  uint32_t signin_state() const {
+    // The game's online menu requires SIGNED_IN_LIVE (2), not SIGNED_IN_LOCALLY
+    // (1). TB2_FAKE_LIVE=1 makes the launcher/experiments look signed in.
+    static const uint32_t state = std::getenv("TB2_FAKE_LIVE") ? 2 : 1;
+    return state;
+  }
   uint32_t type() const { return 1 | 2; /* local | online profile? */ }
 
   void set_kernel_state(KernelState* ks) { kernel_state_ = ks; }

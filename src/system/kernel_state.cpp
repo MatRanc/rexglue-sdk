@@ -10,6 +10,7 @@
  */
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -1088,6 +1089,11 @@ void KernelState::RegisterNotifyListener(XNotifyListener* listener) {
   auto global_lock = global_critical_region_.Acquire();
   notify_listeners_.push_back(retain_object(listener));
 
+  if (std::getenv("TB2_NET_LOG")) {
+    REXSYS_INFO("[net] RegisterNotifyListener mask={:016X} startup_sent={} live_sent={}",
+                listener->mask(), has_notified_startup_, has_notified_live_startup_);
+  }
+
   // Games seem to expect a few notifications on startup, only for the first
   // listener.
   // https://cs.rin.ru/forum/viewtopic.php?f=38&t=60668&hilit=resident+evil+5&start=375
@@ -1105,6 +1111,32 @@ void KernelState::RegisterNotifyListener(XNotifyListener* listener) {
     // XN_SYS_INPUTDEVICECONFIGCHANGED x2
     listener->EnqueueNotification(0x00000013, 0);
     listener->EnqueueNotification(0x00000013, 0);
+  }
+
+  // Xbox Live startup notifications. Without the "live connection changed"
+  // (0x02000001), titles such as 4E4D07D3 get stuck in their online menus
+  // waiting for the sign-in to complete.
+  if (!has_notified_live_startup_ && listener->mask() & 0x00000002) {
+    has_notified_live_startup_ = true;
+    const bool live = user_profile()->signin_state() == 2;
+    listener->EnqueueNotification(0x02000001, live ? 0x001510F0u : 0x001510F1u);
+    listener->EnqueueNotification(0x02000009, 0);
+  }
+
+  // A listener that asked for both system and Live events (mask 3) also
+  // expects a sign-in-changed event once Live sign-in is done; without it
+  // titles such as 4D5307D4 never finish "signing in" to Xbox Live.
+  if (listener->mask() == 0x00000003) {
+    listener->EnqueueNotification(0x0000000A, 1);
+  }
+
+  // Experimental (The Bigs 2): the online manager registers its own system
+  // listener after the first one, so the "first listener only" startup block
+  // above never reaches it and it never sees XN_SYS_SIGNINCHANGED. With
+  // TB2_NOTIFY_ALL=1, give every system listener the sign-in-changed event.
+  if (std::getenv("TB2_NOTIFY_ALL") && (listener->mask() & 0x00000001) &&
+      (listener->mask() != 0x00000003)) {
+    listener->EnqueueNotification(0x0000000A, 1);
   }
 }
 
@@ -1124,6 +1156,10 @@ void KernelState::BroadcastNotification(XNotificationID id, uint32_t data) {
     auto global_lock = global_critical_region_.Acquire();
     REXSYS_DEBUG("BroadcastNotification(id={:#x}, data={}) to {} listeners",
                  static_cast<uint32_t>(id), data, notify_listeners_.size());
+    if (std::getenv("TB2_NET_LOG")) {
+      REXSYS_INFO("[net] BroadcastNotification id={:08X} data={} to {} listeners",
+                  static_cast<uint32_t>(id), data, notify_listeners_.size());
+    }
     snapshot = notify_listeners_;
   }
   for (const auto& notify_listener : snapshot) {

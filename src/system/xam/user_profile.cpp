@@ -17,6 +17,8 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xam/user_profile.h>
 
+#include <cstdlib>
+
 namespace rex {
 namespace system {
 namespace xam {
@@ -25,8 +27,22 @@ UserProfile::UserProfile() {
   // 58410A1F checks the user XUID against a mask of 0x00C0000000000000 (3<<54),
   // if non-zero, it prevents the user from playing the game.
   // "You do not have permissions to perform this operation."
-  xuid_ = 0xB13EBABEBABEBABE;
-  name_ = "User";
+  xuid_ = 0xB13EBABEBABEBABE;  // default profile "User"; named profiles derive theirs below
+  // One knob for the local gamertag; the game-side synthetic account reads the same variable.
+  const char* env_name = std::getenv("TB2_ACCOUNT_NAME");
+  name_ = (env_name && *env_name) ? env_name : "User";
+  // Two instances on one network need different identities: derive the XUID from the name
+  // (bytes B1 3E BA BE BA BE xx yy, xx/yy never 0 so string-style copies keep all 8 bytes).
+  // Keep in sync with TB2XuidFromName in thebigs2/src/online_debug.cpp.
+  if (name_ != "User") {
+    uint32_t h = 2166136261u;
+    for (unsigned char c : name_) {
+      h ^= c;
+      h *= 16777619u;
+    }
+    const uint64_t a = (h & 0xFF) % 255 + 1, b = ((h >> 8) & 0xFF) % 255 + 1;
+    xuid_ = 0xB13EBABEBABE0000ull | (a << 8) | b;
+  }
 
   // https://cs.rin.ru/forum/viewtopic.php?f=38&t=60668&hilit=gfwl+live&start=195
   // https://github.com/arkem/py360/blob/master/py360/constants.py

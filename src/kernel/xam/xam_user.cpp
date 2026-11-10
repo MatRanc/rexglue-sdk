@@ -12,6 +12,8 @@
 // Disable warnings about unused parameters for kernel functions
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 
 #include <rex/cvar.h>
@@ -35,6 +37,15 @@ namespace kernel {
 namespace xam {
 using namespace rex::system;
 using namespace rex::system::xam;
+
+namespace {
+
+bool NetLogEnabled() {
+  static const bool enabled = std::getenv("TB2_NET_LOG") != nullptr;
+  return enabled;
+}
+
+}  // namespace
 
 i32 XamUserGetXUID_entry(u32 user_index, u32 type_mask, mapped_u64 xuid_ptr) {
   assert_true(type_mask == 1 || type_mask == 2 || type_mask == 3 || type_mask == 4 ||
@@ -61,17 +72,28 @@ i32 XamUserGetXUID_entry(u32 user_index, u32 type_mask, mapped_u64 xuid_ptr) {
   } else {
     result = X_E_INVALIDARG;
   }
+  if (NetLogEnabled()) {
+    REXKRNL_INFO("[net] XamUserGetXUID({}) -> {:08X} xuid {:016X}", user_index, result, xuid);
+  }
   *xuid_ptr = xuid;
   return result;
 }
 
 u32 XamUserGetSigninState_entry(u32 user_index) {
   uint32_t signin_state = 0;
-  if (user_index < 4) {
+  // Experimental (The Bigs 2): the online manager scans the online user slots
+  // (4..15) for a signed-in user. TB2_SIGNIN_ALL reports the fake Live sign-in
+  // for every slot, not just local slot 0.
+  if (std::getenv("TB2_SIGNIN_ALL") && user_index < 16) {
+    signin_state = REX_KERNEL_STATE()->user_profile()->signin_state();
+  } else if (user_index < 4) {
     if (user_index == 0) {
       const auto& user_profile = REX_KERNEL_STATE()->user_profile();
       signin_state = user_profile->signin_state();
     }
+  }
+  if (NetLogEnabled()) {
+    REXKRNL_INFO("[net] XamUserGetSigninState({}) -> {}", user_index, signin_state);
   }
   return signin_state;
 }
@@ -100,6 +122,10 @@ i32 XamUserGetSigninInfo_entry(u32 user_index, u32 flags, ppc_ptr_t<X_USER_SIGNI
   info->xuid = user_profile->xuid();
   info->signin_state = user_profile->signin_state();
   rex::string::copy_truncating(info->name, user_profile->name(), rex::countof(info->name));
+  if (NetLogEnabled()) {
+    REXKRNL_INFO("[net] XamUserGetSigninInfo({}) -> state {} xuid {:016X} name '{}'", user_index,
+                 uint32_t(info->signin_state), uint64_t(info->xuid), info->name);
+  }
   return X_E_SUCCESS;
 }
 
@@ -115,6 +141,7 @@ u32 XamUserGetName_entry(u32 user_index, mapped_string buffer, u32 buffer_len) {
   const auto& user_profile = REX_KERNEL_STATE()->user_profile();
   const auto& user_name = user_profile->name();
   rex::string::copy_truncating(buffer, user_name, std::min(buffer_len, uint32_t(16)));
+  if (NetLogEnabled()) REXKRNL_INFO("[net] XamUserGetName({}) -> {}", user_index, user_name);
   return X_E_SUCCESS;
 }
 
@@ -149,6 +176,17 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index, ui
                                       be<uint32_t>* setting_ids, uint32_t unk,
                                       be<uint32_t>* buffer_size_ptr, uint8_t* buffer,
                                       XAM_OVERLAPPED* overlapped) {
+  if (NetLogEnabled()) {
+    REXKRNL_INFO(
+        "[net] XamUserReadProfileSettings(title {:08X} user {} xuid_count {} settings {} "
+        "buf_size {} buf {:p} overlapped {:p})",
+        title_id, user_index, xuid_count, setting_count,
+        buffer_size_ptr ? static_cast<uint32_t>(*buffer_size_ptr) : 0,
+        static_cast<void*>(buffer), static_cast<void*>(overlapped));
+    for (uint32_t i = 0; setting_ids && i < setting_count && i < 32; ++i) {
+      REXKRNL_INFO("[net]   setting[{}] = {:08X}", i, uint32_t(setting_ids[i]));
+    }
+  }
   if (!xuid_count) {
     assert_null(xuids);
   } else {
@@ -204,6 +242,10 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index, ui
   if (!buffer || buffer_size < needed_size) {
     if (!buffer_size) {
       *buffer_size_ptr = needed_size;
+    }
+    if (NetLogEnabled()) {
+      REXKRNL_INFO("[net] XamUserReadProfileSettings -> INSUFFICIENT_BUFFER (need {})",
+                   needed_size);
     }
     return X_ERROR_INSUFFICIENT_BUFFER;
   }
@@ -280,6 +322,9 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index, ui
     REX_KERNEL_STATE()->CompleteOverlappedImmediate(
         REX_KERNEL_MEMORY()->HostToGuestVirtual(overlapped), X_ERROR_SUCCESS);
     return X_ERROR_IO_PENDING;
+  }
+  if (NetLogEnabled()) {
+    REXKRNL_INFO("[net] XamUserReadProfileSettings -> success ({} settings)", setting_count);
   }
   return X_ERROR_SUCCESS;
 }
@@ -383,7 +428,12 @@ u32 XamUserCheckPrivilege_entry(u32 user_index, u32 mask, mapped_u32 out_value) 
   }
 
   // If we deny everything, games should hopefully not try to do stuff.
-  *out_value = 0;
+  // TB2_FAKE_LIVE grants whatever the caller asks for (online play, etc.).
+  *out_value = std::getenv("TB2_FAKE_LIVE") ? mask : 0;
+  if (NetLogEnabled()) {
+    REXKRNL_INFO("[net] XamUserCheckPrivilege({}) mask {:08X} -> {:08X}", user_index, mask,
+                 uint32_t(*out_value));
+  }
   return X_ERROR_SUCCESS;
 }
 
@@ -476,6 +526,7 @@ u32 XamUserAreUsersFriends_entry(u32 user_index, u32 unk1, u32 unk2, mapped_u32 
 }
 
 u32 XamShowSigninUI_entry(u32 unk, u32 unk_mask) {
+  if (NetLogEnabled()) REXKRNL_INFO("[net] XamShowSigninUI({}, {:08X})", unk, unk_mask);
   // Mask values vary. Probably matching user types? Local/remote?
 
   // To fix game modes that display a 4 profile signin UI (even if playing
@@ -595,6 +646,80 @@ class XStaticAchievementEnumerator : public XEnumerator {
   size_t current_item_ = 0;
 };
 
+// Offline stats read. With no Live service the real call has nothing to return, so the
+// game's per-player lookup fails and the Game Room shows blank names. For an XUID-pivot
+// request return one view with one row carrying that XUID's gamertag (columns zeroed).
+// Name: the local profile name for the local XUID, else TB2_PEER_NAME (default "User2").
+// The generic hook marshaller only reads the low 32 bits of each integer register, so the raw
+// wrapper below stashes the full 64-bit pivot XUID (r5) here.
+thread_local uint64_t g_stats_pivot_xuid = 0;
+
+u32 XamUserCreateStatsEnumerator_entry(u32 title_id, u32 type, u32 /*pivot_low32*/, u32 num_rows,
+                                       u32 num_specs, u32 specs_ptr, mapped_u32 size_ptr,
+                                       mapped_u32 handle_ptr) {
+  const uint64_t pivot = g_stats_pivot_xuid;
+  constexpr uint32_t kSpecAttrs = 64;                    // X_USER_STATS_ATTRIBUTES_IN_SPEC
+  constexpr uint32_t kSpecSize = 8 + kSpecAttrs * 2;     // X_USER_STATS_SPEC
+  constexpr uint32_t kViewSize = 0x10, kRowSize = 0x30, kColSize = 0x18;
+  if (!size_ptr || !handle_ptr || !num_rows || !num_specs || !specs_ptr || num_rows > 100) {
+    return X_ERROR_INVALID_PARAMETER;
+  }
+  *size_ptr = 0;
+  *handle_ptr = 0;
+
+  auto* mem = REX_KERNEL_STATE()->memory();
+  auto spec_cols = [&](uint32_t i) {
+    return rex::memory::load_and_swap<uint32_t>(mem->TranslateVirtual(specs_ptr + i * kSpecSize + 4));
+  };
+  uint32_t buffer_size = 8 + num_specs * (kRowSize * num_rows + kViewSize);
+  for (uint32_t i = 0; i < num_specs; i++) buffer_size += (kColSize + 4) * num_rows * spec_cols(i);
+
+  auto e = object_ref<XStaticUntypedEnumerator>(
+      new XStaticUntypedEnumerator(REX_KERNEL_STATE(), 1, buffer_size));
+  auto result = e->Initialize(0xFF, 0xFB, 0xB0023, 0xB0024, 0);
+  if (XFAILED(result)) return result;
+
+  if (type == 0 && pivot) {  // XUID pivot: one row per spec
+    const uint32_t base = mem->SystemHeapAlloc(buffer_size);
+    uint8_t* b = mem->TranslateVirtual(base);
+    std::memset(b, 0, buffer_size);
+    auto put32 = [&](uint32_t off, uint32_t v) { rex::memory::store_and_swap<uint32_t>(b + off, v); };
+    const auto& prof = REX_KERNEL_STATE()->user_profile();
+    std::string name = (pivot == prof->xuid()) ? prof->name()
+                       : (std::getenv("TB2_PEER_NAME") ? std::getenv("TB2_PEER_NAME") : "User2");
+    uint32_t views = 8, rows = views + num_specs * kViewSize, cols = rows + num_specs * kRowSize;
+    put32(0, num_specs);
+    put32(4, base + views);
+    for (uint32_t i = 0; i < num_specs; i++) {
+      const uint32_t n = spec_cols(i);
+      const uint32_t view_id = rex::memory::load_and_swap<uint32_t>(mem->TranslateVirtual(specs_ptr + i * kSpecSize));
+      put32(views + i * kViewSize + 0, view_id);
+      put32(views + i * kViewSize + 4, 1);   // total rows
+      put32(views + i * kViewSize + 8, 1);   // rows returned
+      put32(views + i * kViewSize + 12, base + rows + i * kRowSize);
+      uint8_t* row = b + rows + i * kRowSize;
+      rex::memory::store_and_swap<uint64_t>(row, pivot);
+      rex::memory::store_and_swap<uint32_t>(row + 8, 1);  // rank
+      std::strncpy(reinterpret_cast<char*>(row + 0x18), name.c_str(), 15);
+      rex::memory::store_and_swap<uint32_t>(row + 0x28, n);
+      rex::memory::store_and_swap<uint32_t>(row + 0x2C, n ? base + cols : 0);
+      for (uint32_t c = 0; c < n; c++, cols += kColSize) {
+        const uint8_t* ids = mem->TranslateVirtual(specs_ptr + i * kSpecSize + 8);
+        rex::memory::store_and_swap<uint16_t>(b + cols, rex::memory::load_and_swap<uint16_t>(ids + c * 2));
+        put32(cols + 8, 1);  // X_USER_DATA_TYPE_INT32, value 0
+      }
+    }
+    std::memcpy(e->AppendItem(), b, buffer_size);
+    if (NetLogEnabled()) {
+      REXKRNL_INFO("[net] XamUserCreateStatsEnumerator xuid {:016X} -> '{}' ({} bytes)", pivot, name,
+                   buffer_size);
+    }
+  }
+  *size_ptr = buffer_size;
+  *handle_ptr = e->handle();
+  return X_ERROR_SUCCESS;
+}
+
 u32 XamUserCreateAchievementEnumerator_entry(u32 title_id, u32 user_index, u32 xuid, u32 flags,
                                              u32 offset, u32 count, mapped_u32 buffer_size_ptr,
                                              mapped_u32 handle_ptr) {
@@ -713,11 +838,13 @@ u32 XamWriteGamerTile_entry(u32 arg1, u32 arg2, u32 arg3, u32 arg4, u32 arg5, u3
 }
 
 u32 XamSessionCreateHandle_entry(mapped_u32 handle_ptr) {
+  if (NetLogEnabled()) REXKRNL_INFO("[net] XamSessionCreateHandle");
   *handle_ptr = 0xCAFEDEAD;
   return X_ERROR_SUCCESS;
 }
 
 u32 XamSessionRefObjByHandle_entry(u32 handle, mapped_u32 obj_ptr) {
+  if (NetLogEnabled()) REXKRNL_INFO("[net] XamSessionRefObjByHandle({:08X})", handle);
   assert_true(handle == 0xCAFEDEAD);
   // TODO(PermaNull): Implement this properly,
   // For the time being returning 0xDEADF00D will prevent crashing.
@@ -749,6 +876,12 @@ REX_EXPORT(__imp__XamUserIsOnlineEnabled, rex::kernel::xam::XamUserIsOnlineEnabl
 REX_EXPORT(__imp__XamUserGetMembershipTier, rex::kernel::xam::XamUserGetMembershipTier_entry)
 REX_EXPORT(__imp__XamUserAreUsersFriends, rex::kernel::xam::XamUserAreUsersFriends_entry)
 REX_EXPORT(__imp__XamShowSigninUI, rex::kernel::xam::XamShowSigninUI_entry)
+extern "C" REX_FUNC(__imp__XamUserCreateStatsEnumerator) {
+  rex::kernel::xam::g_stats_pivot_xuid = ctx.r5.u64;
+  rex::ppc::HostToGuestFunction<rex::kernel::xam::XamUserCreateStatsEnumerator_entry>(ctx, base);
+}
+static rex::ppc::detail::PPCFuncRegistrar _ppc_reg___imp__XamUserCreateStatsEnumerator(
+    "__imp__XamUserCreateStatsEnumerator", &__imp__XamUserCreateStatsEnumerator);
 REX_EXPORT(__imp__XamUserCreateAchievementEnumerator,
            rex::kernel::xam::XamUserCreateAchievementEnumerator_entry)
 REX_EXPORT(__imp__XamParseGamerTileKey, rex::kernel::xam::XamParseGamerTileKey_entry)
@@ -761,7 +894,6 @@ REX_EXPORT_STUB(__imp__XamUserAddRecentPlayer);
 REX_EXPORT_STUB(__imp__XamUserAllowedToPostToSocialNetwork);
 REX_EXPORT_STUB(__imp__XamUserCreateAvatarAssetEnumerator);
 REX_EXPORT_STUB(__imp__XamUserCreatePlayerEnumerator);
-REX_EXPORT_STUB(__imp__XamUserCreateStatsEnumerator);
 REX_EXPORT_STUB(__imp__XamUserCreateTitlesPlayedEnumerator);
 REX_EXPORT_STUB(__imp__XamUserFlushLogonQueue);
 REX_EXPORT_STUB(__imp__XamUserGetAge);

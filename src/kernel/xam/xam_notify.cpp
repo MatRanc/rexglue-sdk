@@ -9,6 +9,8 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <cstdlib>
+
 #include <rex/kernel/xam/private.h>
 #include <rex/logging.h>
 #include <rex/hook.h>
@@ -39,6 +41,10 @@ uint32_t xeXamNotifyCreateListener(uint64_t mask, uint32_t is_system, uint32_t m
   REXKRNL_DEBUG(
       "XamNotifyCreateListener(mask={:#018x}, is_system={}, max_version={}) -> handle={:08X}", mask,
       is_system, max_version, handle);
+  if (std::getenv("TB2_NET_LOG")) {
+    REXKRNL_INFO("[net] XamNotifyCreateListener mask {:016X} max_version {} -> {:08X}", mask,
+                 max_version, handle);
+  }
 
   return handle;
 }
@@ -91,6 +97,10 @@ u32 XNotifyGetNext_entry(u32 handle, u32 match_id, mapped_u32 id_ptr, mapped_u32
   if (dequeued) {
     REXKRNL_NOISY_DEBUG("XNotifyGetNext({:08X}, {:08X}) -> id={:#x}, param={}", uint32_t(handle),
                         uint32_t(match_id), id, param);
+    if (std::getenv("TB2_NET_LOG")) {
+      REXKRNL_INFO("[net] XNotifyGetNext handle {:08X} match {:08X} -> id {:08X} param {:08X}",
+                   uint32_t(handle), uint32_t(match_id), id, param);
+    }
   }
   return dequeued ? 1 : 0;
 }
