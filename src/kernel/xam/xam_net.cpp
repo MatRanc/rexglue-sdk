@@ -807,17 +807,24 @@ u32 NetDll_getsockopt_entry(u32 caller, u32 socket_handle, u32 level, u32 optnam
   constexpr u32 kXSolSocket = 0xFFFF;
   constexpr u32 kXSoError = 0x1007;
   if (level == kXSolSocket && optname == kXSoError && optval_ptr) {
-#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
     int err = 0;
+#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
     socklen_t len = sizeof(err);
     if (getsockopt(static_cast<int>(socket->native_handle()), SOL_SOCKET, SO_ERROR, &err, &len) != 0)
       err = errno;
     const uint32_t wsa = err ? NativeSocketErrorToWsa(err) : 0;
+#else
+    // Winsock's SO_ERROR is already a WSA code.
+    int len = sizeof(err);
+    if (getsockopt(static_cast<SOCKET>(socket->native_handle()), SOL_SOCKET, SO_ERROR,
+                   reinterpret_cast<char*>(&err), &len) != 0)
+      err = WSAGetLastError();
+    const uint32_t wsa = static_cast<uint32_t>(err);
+#endif
     *optval_ptr = wsa;
     if (optlen_ptr) *optlen_ptr = 4;
     if (NetLogEnabled())
       REXKRNL_INFO("[net] getsockopt socket {} SO_ERROR -> wsa {:04X}", socket_handle, wsa);
-#endif
   }
   return 0;
 }
@@ -918,10 +925,8 @@ u32 NetDll_connect_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR> nam
   }
   X_STATUS status = socket->Connect(&native_name, namelen);
   if (XFAILED(status)) {
-    uint32_t error = xboxkrnl::xeRtlNtStatusToDosError(status);
-#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
-    error = NativeSocketErrorToWsa(errno);
-#endif
+    // Windows too: a status-mapped error hides WSAEWOULDBLOCK and the title aborts the connect.
+    const uint32_t error = NativeSocketErrorToWsa(errno);
     XThread::SetLastError(error);
     if (NetLogEnabled()) {
       REXKRNL_INFO("[net] connect socket {} -> -1 (wsa {:04X})", socket_handle, error);
@@ -981,10 +986,7 @@ u32 NetDll_accept_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR> addr
     }
     return new_socket->handle();
   } else {
-    uint32_t error = 10035;  // WSAEWOULDBLOCK
-#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
-    error = NativeSocketErrorToWsa(errno);
-#endif
+    const uint32_t error = NativeSocketErrorToWsa(errno);
     XThread::SetLastError(error);
     if (NetLogEnabled()) {
       REXKRNL_INFO("[net] accept socket {} -> -1 (wsa {:04X})", socket_handle, error);
