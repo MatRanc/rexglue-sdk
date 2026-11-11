@@ -140,6 +140,19 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
                     user_count, xuid_array_ptr, user_index_array, private_slots_array);
       return X_E_SUCCESS;
     }
+    case 0x000B0013: {
+      // Same layout as join. Failing it left The Bigs 2's host on "Exiting match, please wait" forever.
+      assert_true(!buffer_length || buffer_length == 20);
+      uint32_t session_ptr = memory::load_and_swap<uint32_t>(buffer + 0);
+      uint32_t user_count = memory::load_and_swap<uint32_t>(buffer + 4);
+      uint32_t xuid_array_ptr = memory::load_and_swap<uint32_t>(buffer + 8);
+      bool is_local = xuid_array_ptr == 0;
+
+      REXKRNL_DEBUG("{}({:08X}, {}, {:08X})",
+                    is_local ? "XGISessionLeaveLocal" : "XGISessionLeaveRemote", session_ptr,
+                    user_count, xuid_array_ptr);
+      return X_E_SUCCESS;
+    }
     case 0x000B0014: {
       assert_true(!buffer_length || buffer_length == 16);
 
